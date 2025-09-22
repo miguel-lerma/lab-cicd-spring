@@ -1,0 +1,21 @@
+# .dockerignore
+
+# Ignorar la carpeta target (se genera en compilación)
+target/
+
+# Ignorar archivos de configuración del IDE
+.vscode/
+.idea/
+
+# Ignorar control de versiones (si no lo necesitas en el contenedor)
+.git/
+
+# Ignorar archivos binarios
+*.class
+*.jar
+
+# Logs, si generas logs locales
+*.log
+logs/
+
+.DS_Store

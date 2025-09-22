@@ -16,7 +16,7 @@ concurrency:
 
 env:
   JAVA_VERSION: "17"
-  APP_DIR: "."   # cambia si tu pom.xml vive en otra ruta
+  APP_DIR: "Backend/Java/ms-voucher"
 
 jobs:
   build-test:

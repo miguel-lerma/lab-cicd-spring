@@ -1,0 +1,248 @@
+# Workflow base para CD
+
+name: Microservices-CD
+on:
+  workflow_dispatch:
+    inputs:
+      #Ambiente al que se publicara
+      deploy_env:
+        description: Publicar en ambiente
+        type: choice
+        options:
+          - DEV
+          - QA
+          - PRD
+      tagimage:
+        description: Tag image
+        type: string
+        default: ""
+  pull_request:
+    types:
+      - closed
+    branches: ["develop", "qa"]
+    paths-ignore:
+      - '.github/**'
+
+jobs:
+  build:
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ 
+          github.event_name == 'pull_request' && 
+          (
+            github.base_ref == 'refs/heads/qa' && 'QA' ||
+            'DEV'
+          ) || 
+          inputs.deploy_env
+        }}
+    env:
+      BRANCH_NAME: ${{ github.head_ref || github.ref_name }} 
+      TAG_PREFIX : ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Definir la rama destino si el PR fue mergeado
+        if: github.event.pull_request.merged == true
+        run: echo "BRANCH_NAME=${{ github.event.pull_request.base.ref }}" >> $GITHUB_ENV
+
+      - name: Enviroment validation
+        shell: bash
+        run: |
+          echo "DEPLOY=$DEPLOY"
+          echo "BRANCH_NAME=$BRANCH_NAME"
+          if [ "$DEPLOY" == "PRD" -a "$BRANCH_NAME" != "main" ] 
+          then
+            echo "El despliegue produccion solo se puede realizar desde el branch main."
+            exit 1;
+          fi
+
+          if [ "$DEPLOY" == "QA" -a "$BRANCH_NAME" != "qa" ] 
+          then
+            echo "El despliegue produccion solo se puede realizar desde el branch QA."
+            exit 1;
+          fi
+
+          echo "makeLatest=$(echo true)" >> "$GITHUB_ENV"
+          echo "prerelease=$(echo false)" >> "$GITHUB_ENV"
+
+          if [ "$DEPLOY" != "PRD" ] 
+          then
+            echo "TAG_PREFIX=${{ inputs.deploy_env }}" >> "$GITHUB_ENV"
+
+            #Si no es productivo ser marca como pre-release
+            echo "makeLatest=$(echo false)" >> "$GITHUB_ENV"
+            echo "prerelease=$(echo true)" >> "$GITHUB_ENV"
+          fi
+        env:
+          DEPLOY: ${{ inputs.deploy_env }}
+
+      - name: Set varaibles
+        id: vars
+        run: |
+          echo "ACR_NAME='${{ vars.ACR_NAME }}'"
+          echo "MANIFEST_PATH='${{ vars.MANIFEST_PATH }}'"
+          echo "REPO_MANIFIESTOS='${{ vars.REPO_MANIFIESTOS }}'"
+          echo "AKV_CREDENTIALS_MASTER= $(echo '${{ secrets.AKV_CREDENTIALS_MASTER }}' | sed ':a;N;$!ba;s/ //g;s/\n//g')"
+          echo "AKV_MASTER_NAME='${{ secrets.AKV_MASTER_NAME }}'"
+          echo "ACR_SERVER='${{ secrets.ACR_SERVER }}'"
+          echo "ACR_USERNAME='${{ secrets.ACR_USERNAME }}'"
+          echo "ACR_PASSWORD='${{ secrets.ACR_PASSWORD }}'"
+
+      #Paso 2: Instalar / Configurar el JDK
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Login Azure Key Vault Maesto
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AKV_CREDENTIALS_MASTER }}
+
+      - name: Read AKV Secrets for DEV y QA
+        uses: Azure/get-keyvault-secrets@v1
+        if: ${{ inputs.deploy_env != 'PRD' }}
+        with:
+          keyvault: ${{ secrets.AKV_MASTER_NAME }}
+          secrets: "APPLICATION-ID-VOCHER-NOPROD,CLIENT-SECRET-VOCHER-NOPROD,TENANT-ID-VOCHER-NOPROD,VAULT-URL-VOCHER-DEV,VAULT-URL-VOCHER-QA"
+
+        #Paso 3: Actualizar application.properties
+      - name: Update properties for DEV y QA
+        if: ${{ inputs.deploy_env != 'PRD' }}
+        run: |
+          sed -i 's|${APPLICATION-ID-COUPON}|${{ env.APPLICATION-ID-VOCHER-NOPROD }}|g' application.properties
+          sed -i 's|${CLIENT-SECRET-COUPON}|${{ env.CLIENT-SECRET-VOCHER-NOPROD }}|g' application.properties
+          sed -i 's|${TENANT-ID-COUPON}|${{ env.TENANT-ID-VOCHER-NOPROD }}|g' application.properties
+          
+          if [ "${{ inputs.deploy_env }}" == "QA" ] 
+          then
+            echo "SET QA URL AKV"
+            sed -i 's|${VAULT-URL-COUPON}|${{ env.VAULT-URL-VOCHER-QA }}|g' application.properties
+          else
+            echo "SET DEV URL AKV"
+            sed -i 's|${VAULT-URL-COUPON}|${{ env.VAULT-URL-VOCHER-DEV }}|g' application.properties
+          fi
+        working-directory: Backend/Java/ms-voucher/src/main/resources/
+
+      - name: Read AKV Secrets for PRODUCTION
+        uses: Azure/get-keyvault-secrets@v1
+        if: ${{ inputs.deploy_env == 'PRD' }}
+        with:
+          keyvault: ${{ secrets.AKV_MASTER_NAME }}
+          secrets: "APPLICATION-ID-VOCHER-PROD,CLIENT-SECRET-VOCHER-PROD,TENANT-ID-VOCHER-PROD,VAULT-URL-VOCHER-PROD"
+
+        #Paso 3: Actualizar application.properties
+      - name: Update properties for PRODUCTION
+        if: ${{ inputs.deploy_env == 'PRD' }}
+        run: |
+          sed -i 's|${APPLICATION-ID-COUPON}|${{ env.APPLICATION-ID-VOCHER-PROD }}|g' application.properties
+          sed -i 's|${CLIENT-SECRET-COUPON}|${{ env.CLIENT-SECRET-VOCHER-PROD }}|g' application.properties
+          sed -i 's|${TENANT-ID-COUPON}|${{ env.TENANT-ID-VOCHER-PROD }}|g' application.properties
+          sed -i 's|${VAULT-URL-COUPON}|${{ env.VAULT-URL-VOCHER-PROD }}|g' application.properties
+        working-directory: Backend/Java/ms-voucher/src/main/resources/
+
+      - name: read file
+        working-directory: Backend/Java/ms-voucher/src/main/resources
+        id: property
+        run: 
+          cat ./application.properties 
+
+      - name: Compilar con maven
+        working-directory: Backend/Java/ms-voucher
+        run: mvn clean package -DskipTests
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - uses: benjlevesque/short-sha@v2.2
+        id: short-sha
+        with:
+          length: 6
+
+      - name: Set env TAG
+        run: |
+          if [ $GITHUB_EVENT_NAME == 'workflow_dispatch' -a '${{ inputs.tagimage }}' != '' ]; then
+            echo "TAG=${{ env.TAG_PREFIX }}${{ github.event.inputs.tagimage }}" >> "$GITHUB_ENV"
+            echo "TAG=${{ env.TAG_PREFIX }}${{ github.event.inputs.tagimage }}"
+          else
+            echo "TAG=${{ env.TAG_PREFIX }}${{ env.SHA }}" >> "$GITHUB_ENV"
+            echo "TAG=${{ env.TAG_PREFIX }}${{ env.SHA }}"
+          fi
+
+      - name: tag
+        run:
+          echo ${{ env.TAG }}
+
+      - name: Build and push
+        working-directory: Backend/Java/ms-voucher
+        run: |
+          docker build . -t $ACR_SERVER/$ACR_NAME:$IMAGE_TAG
+          docker push $ACR_SERVER/$ACR_NAME:$IMAGE_TAG
+        env:
+          IMAGE_TAG: ${{ env.TAG }}
+          ACR_SERVER: ${{ secrets.ACR_SERVER }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
+
+      - name: Clonar Repositorio manifiestos
+        uses: actions/checkout@v4
+        with:
+          repository: "${{ vars.REPO_MANIFIESTOS }}"
+          token: ${{ secrets.GIT_HUB_NUGET_PUSH_TOKEN }}
+          ref: main
+
+      - name: Configurar credenciales de GitHub
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Actualizar imagen en manifiesto kubernetes
+        env:
+          ECR_REGISTRY: ${{ secrets.ACR_SERVER }}
+          ECR_REPOSITORY: ${{ vars.ACR_NAME }}
+          IMAGE_TAG: ${{ env.TAG }}
+        run: |
+          sed -i 's|image: .*|image: '"$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"'|' ${{ vars.MANIFEST_PATH }}/deployment.yml
+
+      - name: Commit updated manifest
+        run: |
+          git add ${{ vars.MANIFEST_PATH }}
+          git commit -a -m "Updated ${{ vars.MANIFEST_PATH }}/deployment.yml manifest with new image version ${{ env.TAG }} for ${{ vars.ACR_NAME }} ${{ inputs.deploy_env }}"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GIT_HUB_NUGET_PUSH_TOKEN }}
+          repository: "${{ vars.REPO_MANIFIESTOS }}"
+          branch: main
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get git Log Last Commit
+        run: |
+          echo "prev_sha=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          echo "prev_sha = $(git rev-parse HEAD)"
+
+      - uses: ncipollo/release-action@v1.14.0
+        if: ${{ inputs.deploy_env != 'DEV' }}
+        name: Create release for this versión
+        with:
+          body: "Release de versión ${{ env.TAG }} ${{ env.branchName }}"
+          tag: "${{ env.TAG }}"
+          commit: ${{ env.prev_sha }}
+          name: "${{ env.TAG }} ${{ env.branchDescription }}"
+          makeLatest: ${{ env.makeLatest }}
+          prerelease: ${{ env.prerelease }}
+        env:
+          branchName: 'generado para la rama ${{ env.BRANCH_NAME }}'
+          branchDescription: ' - branch: ${{ env.BRANCH_NAME }}'

@@ -1,0 +1,56 @@
+# Template base para workflow de CI
+
+name: Microservices-CI
+on:
+  # Se habilita la ejecución manual del workflow
+  workflow_dispatch:
+    inputs:
+      # Parametro para forzar la ejecución del escaneo de seguridad en forma manaul
+      checkmarxRun:
+        description: Ejecutar escaneo de seguridad checkmarx
+        type: boolean
+        default: false
+  # Triggers para el pull request solo en las ramas designadas
+  pull_request:
+    branches: ["main", "develop", "qa", "staging*", "feature*", "bug*", "hot*"]
+  push:
+    branches: ["wip*", "hotfix*","bugfix*", "hot-fix*", "bug-fix*"]
+    paths-ignore:
+      - '.github/**'
+jobs:
+  # Job para escaneo de seguridad, solo ejecuta en el PR o si se fuerza en forma manual
+  security_check:
+    uses: BUS-Tienda/Xpos.Pipelines/.github/workflows/checkmarx-workflow.yml@v1.3.26.1
+    if: github.event_name == 'pull_request' || inputs.checkmarxRun
+    with:
+      tags: "DevSecOps,Journey3.0,I24040-MVP2-Estructura-Integracion-de-Cupones,BUS-Tienda,.NET"
+      othertags: "Oxxo"
+      threshold: "sast-critical=1;sca-critical=1;iac-security-critical=1;sast-high=1;sca-high=1;iac-security-high=1;iac-security-medium=1"
+    secrets:
+      cx_client_id: ${{ secrets.CLIENT_ID }}
+      cx_client_secret: ${{ secrets.SECRET }}
+
+  build:
+    runs-on: ubuntu-latest
+    needs: security_check
+    if: ${{ always() && !failure() && !cancelled() }}
+    steps:
+      #Paso 1: Clonar el repositorio
+      - name: Checkout out repository
+        uses: actions/checkout@v4
+
+      #Paso 2: Instalar / Configurar el JDK
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+      #Paso 3 Ejecución de pruebas unitarias
+      - name: Build and Test
+        working-directory: Backend/Java/ms-voucher
+        run:
+          mvn clean verify             
+        
+      - name: Compilar con maven
+        working-directory: Backend/Java/ms-voucher
+        run: mvn clean package -DskipTests

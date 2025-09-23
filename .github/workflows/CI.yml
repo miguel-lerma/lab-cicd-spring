@@ -107,13 +107,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # evita rate limits y problemas en PRs
         with:
           scan-type: fs
-          # ruta relativa desde /github/workspace (o usa /github/workspace/${{ env.APP_DIR }})
-          scan-ref: ${{ env.APP_DIR }}
+          # ruta relativa desde /github/workspace
+          scan-ref: ${{ env.APP_DIR }}               # Backend/Java/ms-voucher
           vuln-type: 'library'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
-          # ignora binarios compilados del repo
-          skip-dirs: '**/target'
+          # ignora binarios compilados dentro del módulo
+          skip-dirs: 'target'
           format: 'sarif'
           output: 'trivy-results.sarif'
           exit-code: '1'                 # falla si hay HIGH/CRITICAL

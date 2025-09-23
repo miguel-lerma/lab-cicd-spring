@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  JAVA_VERSION: "17"
-  APP_DIR: "Backend/Java/ms-voucher"   # carpeta donde vive tu pom.xml
+  JAVA_VERSION: '17'
+  APP_DIR: 'Backend/Java/ms-voucher'   # carpeta donde vive tu pom.xml
 
 jobs:
   build-test:
@@ -63,7 +63,7 @@ jobs:
           retention-days: 7
 
       - name: Summary (Build & Test ✅)
-        if: success()
+        if: ${{ success() }}
         run: |
           {
             echo "### ✅ Build & Test (Maven)";
@@ -73,7 +73,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary (Build & Test ❌)
-        if: failure()
+        if: ${{ failure() }}
         run: |
           {
             echo "### ❌ Build & Test (Maven)";
@@ -373,11 +373,67 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
 
+      # --- PASO NUEVO: guardamos log y generamos reporte
       - name: Generate coverage (audit)
         id: jacoco_run
         working-directory: ${{ env.APP_DIR }}
+        shell: bash
         run: |
-          mvn -B org.jacoco:jacoco-maven-plugin:0.8.11:prepare-agent test org.jacoco:jacoco-maven-plugin:0.8.11:report || true
+          set -o pipefail
+          LOG="$RUNNER_TEMP/jacoco_mvn.log"
+          mvn -B org.jacoco:jacoco-maven-plugin:0.8.11:prepare-agent test org.jacoco:jacoco-maven-plugin:0.8.11:report | tee "$LOG"
+          echo "log=$LOG" >> "$GITHUB_OUTPUT"
+
+      # --- PASO NUEVO: diagnóstico automático si falta el XML
+      - name: Diagnose missing JaCoCo report
+        if: always()
+        shell: bash
+        run: |
+          APP="${{ env.APP_DIR }}"
+          LOG="${{ steps.jacoco_run.outputs.log }}"
+          XML="$(find "$APP/target" -type f -name jacoco.xml | head -n1 || true)"
+          EXEC="$(find "$APP/target" -type f -name 'jacoco*.exec' | head -n1 || true)"
+          SR="$APP/target/surefire-reports"
+
+          {
+            echo "### 🛠️ Diagnóstico JaCoCo"
+            if [[ -n "$XML" ]]; then
+              echo "- ✅ Encontrado **jacoco.xml**: \`$XML\`"
+            else
+              echo "- ❌ **jacoco.xml** no encontrado."
+            fi
+
+            if [[ -n "$EXEC" ]]; then
+              echo "- ✅ **jacoco.exec** presente: \`$EXEC\` (si falta el XML, probablemente **no corrió** el goal **report**)."
+            else
+              echo "- ❌ **jacoco.exec** ausente: pruebas no corrieron o el agent no se adjuntó."
+            fi
+
+            if [[ -d "$SR" ]]; then
+              COUNT_XML=$(ls -1 "$SR"/*.xml 2>/dev/null | wc -l | tr -d ' ')
+              echo "- Surefire reports: **$COUNT_XML** archivos en \`$SR\`"
+              SUM=$(grep -hE "Tests run: " "$SR"/*.txt 2>/dev/null | head -n1 || true)
+              [[ -n "$SUM" ]] && echo "- Resumen surefire: $SUM"
+            else
+              echo "- ❌ Directorio \`$SR\` no existe → **no se ejecutaron pruebas**."
+            fi
+
+            echo ""
+            echo "<details><summary>Fragmentos del log de Maven (JaCoCo)</summary>"
+            if [[ -f "$LOG" ]]; then
+              grep -E "jacoco.*(prepare-agent|report)" "$LOG" || echo "(no se encontró ejecución de jacoco en el log)"
+            else
+              echo "(log no disponible)"
+            fi
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Maven log (diagnosis)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-maven-log
+          path: ${{ steps.jacoco_run.outputs.log }}
 
       - name: Locate JaCoCo report
         id: find_jacoco

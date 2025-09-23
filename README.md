@@ -1,3 +1,3 @@
 # Template para proyectos API REST Java Springboot 17
 feature
-trigger2
+trigger3

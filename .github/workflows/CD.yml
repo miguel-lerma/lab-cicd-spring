@@ -1,0 +1,8 @@
+name: CD (disabled)
+on:
+  workflow_dispatch:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CD temporalmente deshabilitado"

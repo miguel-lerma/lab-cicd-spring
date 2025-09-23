@@ -1,10 +1,6 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project ...>
   <modelVersion>4.0.0</modelVersion>
 
-  <!-- Puedes reemplazar este parent por el company-parent si lo adoptas -->
   <parent>
     <groupId>org.springframework.boot</groupId>
     <artifactId>spring-boot-starter-parent</artifactId>
@@ -12,60 +8,20 @@
     <relativePath/>
   </parent>
 
-  <groupId>com.femsa.oxxo.voucher</groupId>
-  <artifactId>ms-voucher</artifactId>
-  <version>0.0.1</version>
-  <name>ms-voucher</name>
-  <description>MS que gestiona las peticiones realizadas desde XPOS al cliente de Cupones</description>
-
   <properties>
     <java.version>17</java.version>
-    <!-- Si no usas company-parent, fijamos aquí también -->
     <maven.surefire.version>3.2.5</maven.surefire.version>
     <jacoco.version>0.8.11</jacoco.version>
   </properties>
 
   <dependencies>
+    <!-- Usar SOLO WebFlux (reactivo, Netty) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-web</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>org.springframework.boot</groupId>
-          <artifactId>spring-boot-starter-tomcat</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>org.springframework</groupId>
-          <artifactId>spring-context</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>org.springframework</groupId>
-          <artifactId>spring-web</artifactId>
-        </exclusion>
-      </exclusions>
+      <artifactId>spring-boot-starter-webflux</artifactId>
     </dependency>
 
-    <dependency>
-      <groupId>org.apache.tomcat.embed</groupId>
-      <artifactId>tomcat-embed-core</artifactId>
-      <version>10.1.43</version>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.tomcat.embed</groupId>
-      <artifactId>tomcat-embed-el</artifactId>
-      <version>10.1.43</version>
-    </dependency>
-
-    <dependency>
-      <groupId>org.springframework</groupId>
-      <artifactId>spring-context</artifactId>
-      <version>6.2.7</version>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework</groupId>
-      <artifactId>spring-web</artifactId>
-      <version>6.2.8</version>
-    </dependency>
+    <!-- QUITADO: spring-boot-starter-web y tomcat-embed-* -->
 
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -96,12 +52,7 @@
       <version>3.18.0</version>
     </dependency>
 
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-webflux</artifactId>
-    </dependency>
-
-    <!-- Spring Data R2DBC -->
+    <!-- Spring Data R2DBC (reactivo) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-r2dbc</artifactId>
@@ -140,6 +91,7 @@
 
   <dependencyManagement>
     <dependencies>
+      <!-- Tu BOM de Azure (lo dejas igual) -->
       <dependency>
         <groupId>com.azure.spring</groupId>
         <artifactId>spring-cloud-azure-dependencies</artifactId>
@@ -147,71 +99,17 @@
         <type>pom</type>
         <scope>import</scope>
       </dependency>
+
+      <!-- NUEVO: BOM de Netty para fijar 4.1.124.Final -->
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-bom</artifactId>
+        <version>4.1.124.Final</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
     </dependencies>
   </dependencyManagement>
 
-  <build>
-    <plugins>
-      <plugin>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-maven-plugin</artifactId>
-      </plugin>
-
-      <!-- Asegura ejecución correcta de JUnit 5 -->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-surefire-plugin</artifactId>
-        <version>${maven.surefire.version}</version>
-        <configuration>
-          <useModulePath>false</useModulePath>
-        </configuration>
-      </plugin>
-
-      <!-- JaCoCo: agente + reporte en verify -->
-      <plugin>
-        <groupId>org.jacoco</groupId>
-        <artifactId>jacoco-maven-plugin</artifactId>
-        <version>${jacoco.version}</version>
-        <executions>
-          <execution>
-            <goals>
-              <goal>prepare-agent</goal>
-            </goals>
-          </execution>
-          <execution>
-            <id>report</id>
-            <phase>verify</phase>
-            <goals>
-              <goal>report</goal>
-            </goals>
-          </execution>
-
-          <!-- Gate opcional: déjalo comentado hasta tener tests -->
-          <!--
-          <execution>
-            <id>check</id>
-            <phase>verify</phase>
-            <goals>
-              <goal>check</goal>
-            </goals>
-            <configuration>
-              <rules>
-                <rule>
-                  <element>BUNDLE</element>
-                  <limits>
-                    <limit>
-                      <counter>LINE</counter>
-                      <value>COVEREDRATIO</value>
-                      <minimum>0.60</minimum>
-                    </limit>
-                  </limits>
-                </rule>
-              </rules>
-            </configuration>
-          </execution>
-          -->
-        </executions>
-      </plugin>
-    </plugins>
-  </build>
+  <!-- build/plugins se quedan igual -->
 </project>

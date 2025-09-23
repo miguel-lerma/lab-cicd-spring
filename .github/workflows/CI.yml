@@ -92,17 +92,22 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/dependency-review-action@v4
+      - id: dep_review
+        uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
           comment-summary-in-pr: true
       - name: Summary (Dependency Review)
         if: always()
         run: |
+          OUTCOME="${{ steps.dep_review.outcome }}"
+          STATUS="CHECK"
+          if [ "$OUTCOME" = "success" ]; then STATUS="OK"; fi
           {
             echo "### 🧩 Dependency Review";
             echo "";
-            echo "- Estado: **${{ success() && 'OK' || 'CHECK' }}**";
+            echo "- Estado: **$STATUS**";
+            echo "- Resultado del paso: **$OUTCOME**";
             echo "- Ver conversación del PR para el comentario auto-generado (si aplica).";
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -389,8 +394,7 @@ jobs:
               TOTAL=$((MISSED + COVERED))
               if [ "$TOTAL" -gt 0 ]; then
                 PCT=$(awk "BEGIN {printf \"%.2f\", (100*$COVERED)/$TOTAL}")
-                ICON="✅"; THRESH=0
-                echo "### $ICON JaCoCo (Line coverage: $PCT%)" >> "$GITHUB_STEP_SUMMARY"
+                echo "### ✅ JaCoCo (Line coverage: $PCT%)" >> "$GITHUB_STEP_SUMMARY"
               else
                 echo "### ⚠️ JaCoCo (sin datos de cobertura)" >> "$GITHUB_STEP_SUMMARY"
               fi
@@ -399,7 +403,6 @@ jobs:
             fi
           else
             echo "### ⚠️ JaCoCo (jacoco.xml no encontrado)" >> "$GITHUB_STEP_SUMMARY"
-          fi
       - name: Upload JaCoCo report
         if: always()
         uses: actions/upload-artifact@v4

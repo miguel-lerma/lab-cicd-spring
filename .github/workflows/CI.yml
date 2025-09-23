@@ -126,13 +126,13 @@ jobs:
         id: gitleaks_scan
         uses: gitleaks/gitleaks-action@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # requerido para PRs
         with:
           version: latest
-          args: --verbose --redact --exit-code 1 --report-format sarif --report-path gitleaks.sarif
+          args: --verbose --redact --exit-code 1 --report-format sarif --report-path ./gitleaks.sarif
 
-      - name: Upload Gitleaks SARIF (public repos)
-        if: ${{ github.repository_visibility == 'public' && always() }}
+      - name: Upload Gitleaks SARIF (public repos, if exists)
+        if: ${{ github.repository_visibility == 'public' && always() && hashFiles('gitleaks.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: gitleaks.sarif
@@ -140,13 +140,18 @@ jobs:
       - name: Summary (Gitleaks)
         if: always()
         run: |
+          EXISTS="${{ hashFiles('gitleaks.sarif') }}"
           OUTCOME="${{ steps.gitleaks_scan.outcome }}"
-          ICON="✅"; MSG="No se detectaron secretos expuestos."
-          if [ "$OUTCOME" != "success" ]; then ICON="❌"; MSG="Se detectaron posibles secretos — revisar logs/SARIF." ; fi
+          if [ -n "$EXISTS" ]; then
+            ICON="✅"; MSG="SARIF generado. Revisar Security tab / artifact."
+            [ "$OUTCOME" != "success" ] && ICON="❌" && MSG="Se detectaron posibles secretos — ver SARIF."
+          else
+            ICON="✅"; MSG="Sin hallazgos (no se generó SARIF)."
+          fi
           {
             echo "### $ICON Secret Scan (Gitleaks)";
             echo "";
-            echo "- Estado: **$OUTCOME**";
+            echo "- Estado del paso: **$OUTCOME**";
             echo "- $MSG";
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -195,7 +200,7 @@ jobs:
           exit-code: '0'
 
       - name: Upload SARIF to Security tab (public repos)
-        if: ${{ github.repository_visibility == 'public' }}
+        if: ${{ github.repository_visibility == 'public' && hashFiles('trivy-results.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
@@ -367,44 +372,57 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
+
       - name: Generate coverage (audit)
         id: jacoco_run
         working-directory: ${{ env.APP_DIR }}
         run: |
           mvn -B org.jacoco:jacoco-maven-plugin:0.8.11:prepare-agent test org.jacoco:jacoco-maven-plugin:0.8.11:report || true
 
+      - name: Locate JaCoCo report
+        id: find_jacoco
+        shell: bash
+        run: |
+          FILE="$(find '${{ env.APP_DIR }}/target' -type f -name jacoco.xml | head -n1 || true)"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+          if [ -n "$FILE" ]; then
+            echo "Found jacoco: $FILE"
+          else
+            echo "No jacoco.xml found"
+          fi
+
       - name: Summary (JaCoCo)
         if: always()
         shell: bash
         run: |
-          XML="${{ env.APP_DIR }}/target/site/jacoco/jacoco.xml"
-          if [[ ! -f "$XML" ]]; then
+          FILE="${{ steps.find_jacoco.outputs.file }}"
+          if [[ -z "$FILE" || ! -f "$FILE" ]]; then
             echo "### ⚠️ JaCoCo (jacoco.xml no encontrado)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-
-          LINE=$(grep -m1 '<counter type="LINE"' "$XML" || true)
+          LINE=$(grep -m1 '<counter type="LINE"' "$FILE" || true)
           MISSED=$(echo "$LINE" | sed -E 's/.*missed="([0-9]+)".*/\1/')
           COVERED=$(echo "$LINE" | sed -E 's/.*covered="([0-9]+)".*/\1/')
-
           if [[ -z "$MISSED" || -z "$COVERED" ]]; then
             echo "### ⚠️ JaCoCo (no se pudo parsear jacoco.xml)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-
           TOTAL=$((MISSED + COVERED))
           if [[ "$TOTAL" -eq 0 ]]; then
             echo "### ⚠️ JaCoCo (sin datos de cobertura)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-
           PCT=$(awk "BEGIN {printf \"%.2f\", (100*$COVERED)/$TOTAL}")
-
-          echo "### ✅ JaCoCo (Line coverage: $PCT%)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### ✅ JaCoCo coverage summary";
+            echo "";
+            echo "- Reporte: \`$FILE\`";
+            echo "- Line coverage: **$PCT%**";
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload JaCoCo report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-jacoco
-          path: ${{ env.APP_DIR }}/target/site/jacoco/**
+          path: ${{ env.APP_DIR }}/target/**/jacoco*.*

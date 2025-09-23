@@ -199,32 +199,7 @@ jobs:
         if: ${{ github.repository_visibility == 'public' && hashFiles('trivy-results.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: 'trivy-results.sarif'
-
-      # === NUEVO: Reporte HTML completo como artifact (antes del setFailed) ===
-      - name: Crear carpeta de reportes
-        run: mkdir -p reports
-
-      - name: Trivy deps (HTML completo)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: fs
-          scan-ref: ${{ env.APP_DIR }}
-          vuln-type: 'library'
-          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
-          ignore-unfixed: true
-          skip-dirs: 'target'
-          format: 'template'
-          template: '@/contrib/html.tpl'
-          output: 'reports/trivy-deps.html'
-          exit-code: '0'   # informativo
-
-      - name: Upload Trivy HTML
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-deps-html
-          path: reports/trivy-deps.html
-          retention-days: 14
+          sarif_file: trivy-results.sarif
 
       - name: Summarize Trivy results and comment on PR
         if: always()
@@ -375,18 +350,19 @@ jobs:
           name: coverage-jacoco
           path: ${{ env.APP_DIR }}/target/**/jacoco*.*
 
-
-  # --- CodeQL: analiza cada PR en modo warning-only (no bloquea) ---
+  # --- CodeQL: visible e informativo en el PR (summary + comentario) ---
   codeql:
     name: CodeQL (PR, warning-only)
     runs-on: ubuntu-latest
+    # Que corra aunque falle build-test (solo informativo)
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false) }}
     continue-on-error: true
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
+    needs: build-test
     permissions:
       contents: read
       actions: read
       security-events: write
-    needs: build-test
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -417,11 +393,63 @@ jobs:
         with:
           category: "/language:java"
 
-      - name: Summary (CodeQL)
+      - name: Summarize CodeQL alerts and comment on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- CODEQL-SUMMARY -->';
+            const { owner, repo } = context.repo;
+            const ref = context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha;
+
+            // Trae alertas de CodeQL para este commit/ref
+            const alerts = await github.paginate(
+              github.rest.codeScanning.listAlertsForRepo,
+              { owner, repo, ref, tool_name: 'CodeQL', per_page: 100 }
+            );
+
+            const counts = { critical:0, high:0, medium:0, low:0, other:0 };
+            for (const a of alerts) {
+              const lvl = a.rule?.security_severity_level || 'other';
+              if (counts[lvl] !== undefined) counts[lvl]++; else counts.other++;
+            }
+
+            const top = alerts.slice(0, 10).map(a => {
+              const lvl = a.rule?.security_severity_level || 'other';
+              const id  = a.rule?.id || a.rule?.name || 'rule';
+              const msg = a.most_recent_instance?.message?.text || a.rule?.description || '';
+              return `| ${lvl.toUpperCase()} | [${id}](${a.html_url}) | ${msg.replace(/\r?\n|\|/g,' ')} |`;
+            }).join('\n');
+
+            const md = `${marker}
+            ### 🔍 CodeQL — Resumen
+            **CRITICAL:** ${counts.critical} · **HIGH:** ${counts.high} · **MEDIUM:** ${counts.medium} · **LOW:** ${counts.low}
+            ${alerts.length===0 ? '✅ Sin alertas para este commit.' : `
+            **Top hallazgos (máx 10):**
+            | Sev | Regla | Descripción |
+            |---|---|---|
+            ${top}
+            `}
+            _Ver todo en **Security → Code scanning alerts**._`;
+
+            await core.summary.addRaw(md).write();
+
+            if (context.eventName === 'pull_request') {
+              const issue_number = context.payload.pull_request.number;
+              const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
+              const prev = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+              if (prev) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: prev.id, body: md });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number, body: md });
+              }
+            }
+
+      - name: Summary (CodeQL job)
         if: always()
         run: |
           {
             echo "### 🔍 CodeQL";
             echo "- Modo: **warning-only** (no bloquea PRs)";
-            echo "- Revisa *Security → Code scanning alerts* para hallazgos.";
+            echo "- Revisa *Security → Code scanning alerts* para el detalle.";
           } >> "$GITHUB_STEP_SUMMARY"

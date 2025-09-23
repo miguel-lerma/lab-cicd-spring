@@ -34,6 +34,7 @@ jobs:
         run: if [ -f "${{ env.APP_DIR }}/mvnw" ]; then chmod +x "${{ env.APP_DIR }}/mvnw"; fi
 
       - name: Build & Unit Tests
+        id: mvn_build
         working-directory: ${{ env.APP_DIR }}
         run: |
           if [ -f "./mvnw" ]; then
@@ -43,6 +44,7 @@ jobs:
           fi
 
       - name: Upload JAR
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: app-jar
@@ -60,6 +62,26 @@ jobs:
             ${{ env.APP_DIR }}/target/failsafe-reports/**
           retention-days: 7
 
+      - name: Summary (Build & Test ✅)
+        if: success()
+        run: |
+          {
+            echo "### ✅ Build & Test (Maven)";
+            echo "";
+            echo "- Módulo: \`${{ env.APP_DIR }}\`";
+            echo "- Estado: **OK**";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary (Build & Test ❌)
+        if: failure()
+        run: |
+          {
+            echo "### ❌ Build & Test (Maven)";
+            echo "";
+            echo "- Módulo: \`${{ env.APP_DIR }}\`";
+            echo "- Estado: **FAIL** — ver logs del paso *Build & Unit Tests*";
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Solo en PR y en repos públicos (en privados requiere GHAS)
   dependency-review:
     name: Dependency Review (PR)
@@ -74,19 +96,55 @@ jobs:
         with:
           fail-on-severity: high
           comment-summary-in-pr: true
+      - name: Summary (Dependency Review)
+        if: always()
+        run: |
+          {
+            echo "### 🧩 Dependency Review";
+            echo "";
+            echo "- Estado: **${{ success() && 'OK' || 'CHECK' }}**";
+            echo "- Ver conversación del PR para el comentario auto-generado (si aplica).";
+          } >> "$GITHUB_STEP_SUMMARY"
 
   gitleaks:
     name: Secret Scan (Gitleaks)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: gitleaks/gitleaks-action@v2
+
+      - name: Gitleaks scan
+        id: gitleaks_scan
+        uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # requerido para PRs
         with:
           version: latest
-          args: --verbose --redact --exit-code 1
+          args: --verbose --redact --exit-code 1 --report-format sarif --report-path gitleaks.sarif
+
+      - name: Upload Gitleaks SARIF (public repos)
+        if: ${{ github.repository_visibility == 'public' && always() }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+
+      - name: Summary (Gitleaks)
+        if: always()
+        run: |
+          OUTCOME="${{ steps.gitleaks_scan.outcome }}"
+          ICON="✅"; MSG="No se detectaron secretos expuestos."
+          if [ "$OUTCOME" != "success" ]; then ICON="❌"; MSG="Se detectaron posibles secretos — revisar logs/SARIF." ; fi
+          {
+            echo "### $ICON Secret Scan (Gitleaks)";
+            echo "";
+            echo "- Estado: **$OUTCOME**";
+            echo "- $MSG";
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---- SCA con Trivy + resumen en PR y Code Scanning ----
   trivy-sca:
@@ -234,9 +292,23 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
       - name: SpotBugs report (audit)
+        id: spotbugs_run
         working-directory: ${{ env.APP_DIR }}
         run: mvn -B com.github.spotbugs:spotbugs-maven-plugin:4.8.6.4:spotbugs || true
-      - name: Upload SpotBugs
+      - name: Summary (SpotBugs)
+        if: always()
+        run: |
+          FILE="${{ env.APP_DIR }}/target/spotbugsXml.xml"
+          COUNT=0
+          [ -f "$FILE" ] && COUNT=$(grep -c "<BugInstance" "$FILE" || true)
+          ICON="✅"; MSG="0 hallazgos"
+          if [ "$COUNT" -gt 0 ]; then ICON="⚠️"; MSG="$COUNT hallazgos (ver artifact HTML/XML)"; fi
+          {
+            echo "### $ICON SpotBugs";
+            echo "";
+            echo "- $MSG";
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload SpotBugs artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -256,12 +328,30 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
       - name: PMD (audit)
+        id: pmd_run
         working-directory: ${{ env.APP_DIR }}
         run: mvn -B org.apache.maven.plugins:maven-pmd-plugin:3.21.2:pmd || true
       - name: Checkstyle (audit - Google)
+        id: checkstyle_run
         working-directory: ${{ env.APP_DIR }}
         run: mvn -B org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:checkstyle -Dcheckstyle.configLocation=google_checks.xml || true
-      - name: Upload PMD/Checkstyle
+      - name: Summary (PMD & Checkstyle)
+        if: always()
+        run: |
+          PMD_FILE="${{ env.APP_DIR }}/target/pmd.xml"
+          CK_FILE="${{ env.APP_DIR }}/target/checkstyle-result.xml"
+          PMD_COUNT=0; CK_COUNT=0
+          [ -f "$PMD_FILE" ] && PMD_COUNT=$(grep -c "<violation" "$PMD_FILE" || true)
+          [ -f "$CK_FILE" ] && CK_COUNT=$(grep -c "<error " "$CK_FILE" || true)
+          {
+            echo "### 🧹 PMD & Checkstyle";
+            echo "";
+            echo "- PMD: **$PMD_COUNT** violaciones";
+            echo "- Checkstyle: **$CK_COUNT** errores";
+            echo "";
+            echo "_Ver artifacts HTML/XML para detalle._";
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload PMD/Checkstyle artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -283,9 +373,33 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
       - name: Generate coverage (audit)
+        id: jacoco_run
         working-directory: ${{ env.APP_DIR }}
         run: |
           mvn -B org.jacoco:jacoco-maven-plugin:0.8.11:prepare-agent test org.jacoco:jacoco-maven-plugin:0.8.11:report || true
+      - name: Summary (JaCoCo)
+        if: always()
+        run: |
+          XML="${{ env.APP_DIR }}/target/site/jacoco/jacoco.xml"
+          if [ -f "$XML" ]; then
+            LINE=$(grep -o '<counter type="LINE"[^/]*/>' "$XML" | head -1 || true)
+            MISSED=$(echo "$LINE" | sed -n 's/.*missed="\([0-9]*\)".*/\1/p')
+            COVERED=$(echo "$LINE" | sed -n 's/.*covered="\([0-9]*\)".*/\1/p')
+            if [ -n "$MISSED" ] && [ -n "$COVERED" ]; then
+              TOTAL=$((MISSED + COVERED))
+              if [ "$TOTAL" -gt 0 ]; then
+                PCT=$(awk "BEGIN {printf \"%.2f\", (100*$COVERED)/$TOTAL}")
+                ICON="✅"; THRESH=0
+                echo "### $ICON JaCoCo (Line coverage: $PCT%)" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "### ⚠️ JaCoCo (sin datos de cobertura)" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            else
+              echo "### ⚠️ JaCoCo (no se pudo parsear jacoco.xml)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "### ⚠️ JaCoCo (jacoco.xml no encontrado)" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload JaCoCo report
         if: always()
         uses: actions/upload-artifact@v4

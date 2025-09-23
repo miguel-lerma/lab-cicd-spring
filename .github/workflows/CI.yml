@@ -60,7 +60,7 @@ jobs:
             ${{ env.APP_DIR }}/target/failsafe-reports/**
           retention-days: 7
 
-  # Solo en PR y en repos públicos (en privados requeriría GHAS)
+  # Solo en PR y en repos públicos (en privados requiere GHAS)
   dependency-review:
     name: Dependency Review (PR)
     if: ${{ github.event_name == 'pull_request' && github.repository_visibility == 'public' }}
@@ -94,7 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write          # subir SARIF al Security tab en repos públicos
+      security-events: write          # subir SARIF al Security tab (repos públicos)
       actions: read
     steps:
       - uses: actions/checkout@v4
@@ -107,13 +107,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # evita rate limits y problemas en PRs
         with:
           scan-type: fs
-          # ruta ABSOLUTA dentro del contenedor de la acción
-          scan-ref: ${{ github.workspace }}/${{ env.APP_DIR }}
+          # ruta relativa desde /github/workspace (o usa /github/workspace/${{ env.APP_DIR }})
+          scan-ref: ${{ env.APP_DIR }}
           vuln-type: 'library'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
-          # reducir ruido de binarios compilados
-          skip-dirs: ${{ github.workspace }}/${{ env.APP_DIR }}/target
+          # ignora binarios compilados del repo
+          skip-dirs: '**/target'
           format: 'sarif'
           output: 'trivy-results.sarif'
           exit-code: '1'                 # falla si hay HIGH/CRITICAL

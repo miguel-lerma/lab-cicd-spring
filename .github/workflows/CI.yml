@@ -15,7 +15,7 @@ concurrency:
 
 env:
   JAVA_VERSION: '17'
-  APP_DIR: 'Backend/Java/ms-voucher'   # carpeta donde vive tu pom.xml
+  APP_DIR: 'Backend/Java/ms-voucher'
 
 jobs:
   build-test:
@@ -67,7 +67,6 @@ jobs:
         run: |
           {
             echo "### ✅ Build & Test (Maven)";
-            echo "";
             echo "- Módulo: \`${{ env.APP_DIR }}\`";
             echo "- Estado: **OK**";
           } >> "$GITHUB_STEP_SUMMARY"
@@ -77,7 +76,6 @@ jobs:
         run: |
           {
             echo "### ❌ Build & Test (Maven)";
-            echo "";
             echo "- Módulo: \`${{ env.APP_DIR }}\`";
             echo "- Estado: **FAIL** — ver logs del paso *Build & Unit Tests*";
           } >> "$GITHUB_STEP_SUMMARY"
@@ -104,10 +102,8 @@ jobs:
           if [ "$OUTCOME" = "success" ]; then STATUS="OK"; fi
           {
             echo "### 🧩 Dependency Review";
-            echo "";
             echo "- Estado: **$STATUS**";
-            echo "- Resultado del paso: **$OUTCOME**";
-            echo "- Ver conversación del PR para el comentario auto-generado (si aplica).";
+            echo "- Resultado: **$OUTCOME**";
           } >> "$GITHUB_STEP_SUMMARY"
 
   gitleaks:
@@ -122,17 +118,19 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
+      # Config simple y soportada por la acción v2 (sin inputs antiguos)
       - name: Gitleaks scan
         id: gitleaks_scan
         uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # requerido para PRs
         with:
-          version: latest
-          args: --verbose --redact --exit-code 1 --report-format sarif --report-path ./gitleaks.sarif
+          report-format: sarif
+          report-path: ./gitleaks.sarif
+          redact: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload Gitleaks SARIF (public repos, if exists)
-        if: ${{ github.repository_visibility == 'public' && always() && hashFiles('gitleaks.sarif') != '' }}
+      - name: Upload Gitleaks SARIF (if exists)
+        if: ${{ always() && hashFiles('gitleaks.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: gitleaks.sarif
@@ -150,7 +148,6 @@ jobs:
           fi
           {
             echo "### $ICON Secret Scan (Gitleaks)";
-            echo "";
             echo "- Estado del paso: **$OUTCOME**";
             echo "- $MSG";
           } >> "$GITHUB_STEP_SUMMARY"
@@ -213,62 +210,40 @@ jobs:
             const fs = require('fs');
             const marker = '<!-- TRIVY-SCA-SUMMARY -->';
             const path = 'trivy.json';
-
-            if (!fs.existsSync(path)) {
-              core.info('No trivy.json found; skipping summary.');
-              return;
-            }
-
-            const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+            if (!fs.existsSync(path)) { core.info('No trivy.json; skip.'); return; }
+            const data = JSON.parse(fs.readFileSync(path,'utf8'));
             const vulns = [];
-            for (const r of (data.Results || [])) {
-              for (const v of (r.Vulnerabilities || [])) {
+            for (const r of (data.Results||[])) {
+              for (const v of (r.Vulnerabilities||[])) {
                 if (['HIGH','CRITICAL'].includes(v.Severity)) {
                   vulns.push({
-                    severity: v.Severity,
-                    id: v.VulnerabilityID || '',
-                    pkg: v.PkgName || '',
-                    installed: v.InstalledVersion || '',
-                    fixed: v.FixedVersion || '-',
+                    severity: v.Severity, id: v.VulnerabilityID||'', pkg: v.PkgName||'',
+                    installed: v.InstalledVersion||'', fixed: v.FixedVersion||'-',
                     url: v.PrimaryURL || (v.References && v.References[0]) || ''
                   });
                 }
               }
             }
-
-            const totalHigh = vulns.filter(x => x.severity === 'HIGH').length;
-            const totalCritical = vulns.filter(x => x.severity === 'CRITICAL').length;
+            const totalHigh = vulns.filter(x=>x.severity==='HIGH').length;
+            const totalCritical = vulns.filter(x=>x.severity==='CRITICAL').length;
             const total = vulns.length;
-
-            const top = vulns
-              .sort((a,b) => (a.severity === 'CRITICAL' ? -1 : 1))
-              .slice(0, 10);
-
-            const rows = top.map(v =>
-              `| ${v.severity} | ${v.pkg} | ${v.installed} | ${v.fixed} | [${v.id}](${v.url}) |`
-            ).join('\n');
-
+            const top = vulns.sort((a,b)=>a.severity==='CRITICAL'?-1:1).slice(0,10);
+            const rows = top.map(v=>`| ${v.severity} | ${v.pkg} | ${v.installed} | ${v.fixed} | [${v.id}](${v.url}) |`).join('\n');
             const md = `${marker}
-            ### 🔒 Trivy SCA — Resumen de vulnerabilidades
+            ### 🔒 Trivy SCA — Resumen
             **HIGH:** ${totalHigh} · **CRITICAL:** ${totalCritical} · **Total:** ${total}
-
-            ${total === 0 ? '✅ No se detectaron vulnerabilidades HIGH/CRITICAL.' : `
+            ${total===0 ? '✅ Sin vulnerabilidades HIGH/CRITICAL.' : `
             **Top hallazgos (máx 10):**
             | Sev | Paquete | Versión | Fijo en | CVE/ID |
             |---|---|---:|---:|---|
             ${rows}
             `}
-
-            _Fuente: análisis de dependencias (filesystem) en \`${process.env.APP_DIR}\`._`;
-
+            _Fuente: análisis de dependencias en \`${process.env.APP_DIR}\`._`;
             await core.summary.addRaw(md).write();
-
             if (context.eventName === 'pull_request') {
               const { owner, repo } = context.repo;
               const issue_number = context.payload.pull_request.number;
-              const { data: comments } = await github.rest.issues.listComments({
-                owner, repo, issue_number, per_page: 100
-              });
+              const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
               const prev = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
               if (prev) {
                 await github.rest.issues.updateComment({ owner, repo, comment_id: prev.id, body: md });
@@ -276,91 +251,7 @@ jobs:
                 await github.rest.issues.createComment({ owner, repo, issue_number, body: md });
               }
             }
-
-            if (total > 0) {
-              core.setFailed(`Trivy found ${total} HIGH/CRITICAL vulnerabilities (HIGH=${totalHigh}, CRITICAL=${totalCritical}).`);
-            }
-
-  spotbugs:
-    name: SpotBugs (SAST ligero)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: maven
-      - name: SpotBugs report (audit)
-        id: spotbugs_run
-        working-directory: ${{ env.APP_DIR }}
-        run: mvn -B com.github.spotbugs:spotbugs-maven-plugin:4.8.6.4:spotbugs || true
-      - name: Summary (SpotBugs)
-        if: always()
-        run: |
-          FILE="${{ env.APP_DIR }}/target/spotbugsXml.xml"
-          COUNT=0
-          [ -f "$FILE" ] && COUNT=$(grep -c "<BugInstance" "$FILE" || true)
-          ICON="✅"; MSG="0 hallazgos"
-          if [ "$COUNT" -gt 0 ]; then ICON="⚠️"; MSG="$COUNT hallazgos (ver artifact HTML/XML)"; fi
-          {
-            echo "### $ICON SpotBugs";
-            echo "";
-            echo "- $MSG";
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload SpotBugs artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: quality-spotbugs
-          path: |
-            ${{ env.APP_DIR }}/target/spotbugsXml.xml
-            ${{ env.APP_DIR }}/target/spotbugs.html
-
-  pmd-checkstyle:
-    name: PMD & Checkstyle
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: maven
-      - name: PMD (audit)
-        id: pmd_run
-        working-directory: ${{ env.APP_DIR }}
-        run: mvn -B org.apache.maven.plugins:maven-pmd-plugin:3.21.2:pmd || true
-      - name: Checkstyle (audit - Google)
-        id: checkstyle_run
-        working-directory: ${{ env.APP_DIR }}
-        run: mvn -B org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:checkstyle -Dcheckstyle.configLocation=google_checks.xml || true
-      - name: Summary (PMD & Checkstyle)
-        if: always()
-        run: |
-          PMD_FILE="${{ env.APP_DIR }}/target/pmd.xml"
-          CK_FILE="${{ env.APP_DIR }}/target/checkstyle-result.xml"
-          PMD_COUNT=0; CK_COUNT=0
-          [ -f "$PMD_FILE" ] && PMD_COUNT=$(grep -c "<violation" "$PMD_FILE" || true)
-          [ -f "$CK_FILE" ] && CK_COUNT=$(grep -c "<error " "$CK_FILE" || true)
-          {
-            echo "### 🧹 PMD & Checkstyle";
-            echo "";
-            echo "- PMD: **$PMD_COUNT** violaciones";
-            echo "- Checkstyle: **$CK_COUNT** errores";
-            echo "";
-            echo "_Ver artifacts HTML/XML para detalle._";
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload PMD/Checkstyle artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: quality-pmd-checkstyle
-          path: |
-            ${{ env.APP_DIR }}/target/site/pmd.html
-            ${{ env.APP_DIR }}/target/site/checkstyle.html
-            ${{ env.APP_DIR }}/target/pmd.xml
-            ${{ env.APP_DIR }}/target/checkstyle-result.xml
+            if (total > 0) core.setFailed(`Trivy encontró ${total} HIGH/CRITICAL (HIGH=${totalHigh}, CRITICAL=${totalCritical}).`);
 
   jacoco:
     name: JaCoCo coverage
@@ -373,7 +264,6 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
 
-      # --- PASO NUEVO: guardamos log y generamos reporte
       - name: Generate coverage (audit)
         id: jacoco_run
         working-directory: ${{ env.APP_DIR }}
@@ -384,7 +274,6 @@ jobs:
           mvn -B org.jacoco:jacoco-maven-plugin:0.8.11:prepare-agent test org.jacoco:jacoco-maven-plugin:0.8.11:report | tee "$LOG"
           echo "log=$LOG" >> "$GITHUB_OUTPUT"
 
-      # --- PASO NUEVO: diagnóstico automático si falta el XML
       - name: Diagnose missing JaCoCo report
         if: always()
         shell: bash
@@ -394,38 +283,18 @@ jobs:
           XML="$(find "$APP/target" -type f -name jacoco.xml | head -n1 || true)"
           EXEC="$(find "$APP/target" -type f -name 'jacoco*.exec' | head -n1 || true)"
           SR="$APP/target/surefire-reports"
-
           {
             echo "### 🛠️ Diagnóstico JaCoCo"
-            if [[ -n "$XML" ]]; then
-              echo "- ✅ Encontrado **jacoco.xml**: \`$XML\`"
-            else
-              echo "- ❌ **jacoco.xml** no encontrado."
-            fi
-
-            if [[ -n "$EXEC" ]]; then
-              echo "- ✅ **jacoco.exec** presente: \`$EXEC\` (si falta el XML, probablemente **no corrió** el goal **report**)."
-            else
-              echo "- ❌ **jacoco.exec** ausente: pruebas no corrieron o el agent no se adjuntó."
-            fi
-
+            [[ -n "$XML" ]] && echo "- ✅ jacoco.xml: \`$XML\`" || echo "- ❌ jacoco.xml no encontrado."
+            [[ -n "$EXEC" ]] && echo "- ✅ jacoco.exec: \`$EXEC\`" || echo "- ❌ jacoco.exec ausente."
             if [[ -d "$SR" ]]; then
               COUNT_XML=$(ls -1 "$SR"/*.xml 2>/dev/null | wc -l | tr -d ' ')
               echo "- Surefire reports: **$COUNT_XML** archivos en \`$SR\`"
               SUM=$(grep -hE "Tests run: " "$SR"/*.txt 2>/dev/null | head -n1 || true)
               [[ -n "$SUM" ]] && echo "- Resumen surefire: $SUM"
             else
-              echo "- ❌ Directorio \`$SR\` no existe → **no se ejecutaron pruebas**."
+              echo "- ❌ \`$SR\` no existe → **no se ejecutaron pruebas**."
             fi
-
-            echo ""
-            echo "<details><summary>Fragmentos del log de Maven (JaCoCo)</summary>"
-            if [[ -f "$LOG" ]]; then
-              grep -E "jacoco.*(prepare-agent|report)" "$LOG" || echo "(no se encontró ejecución de jacoco en el log)"
-            else
-              echo "(log no disponible)"
-            fi
-            echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Maven log (diagnosis)
@@ -470,8 +339,7 @@ jobs:
           fi
           PCT=$(awk "BEGIN {printf \"%.2f\", (100*$COVERED)/$TOTAL}")
           {
-            echo "### ✅ JaCoCo coverage summary";
-            echo "";
+            echo "### ✅ JaCoCo coverage";
             echo "- Reporte: \`$FILE\`";
             echo "- Line coverage: **$PCT%**";
           } >> "$GITHUB_STEP_SUMMARY"
@@ -482,3 +350,53 @@ jobs:
         with:
           name: coverage-jacoco
           path: ${{ env.APP_DIR }}/target/**/jacoco*.*
+
+  # --- CodeQL: analiza cada PR en modo warning-only (no bloquea) ---
+  codeql:
+    name: CodeQL (PR, warning-only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Init CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: java
+          queries: +security-and-quality
+
+      - name: Build for CodeQL database
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if [ -f "./mvnw" ]; then
+            ./mvnw -B -DskipTests package
+          else
+            mvn -B -DskipTests package
+          fi
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:java"
+
+      - name: Summary (CodeQL)
+        if: always()
+        run: |
+          {
+            echo "### 🔍 CodeQL";
+            echo "- Modo: **warning-only** (no bloquea PRs)";
+            echo "- Revisa *Security → Code scanning alerts* para hallazgos.";
+          } >> "$GITHUB_STEP_SUMMARY"

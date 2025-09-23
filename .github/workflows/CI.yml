@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -97,8 +98,7 @@ jobs:
       - name: Summary (Dependency Review)
         if: always()
         run: |
-          OUTCOME="${{ steps.dep_review.outcome }}"
-          STATUS="CHECK"
+          OUTCOME="${{ steps.dep_review.outcome }}"; STATUS="CHECK"
           if [ "$OUTCOME" = "success" ]; then STATUS="OK"; fi
           {
             echo "### 🧩 Dependency Review";
@@ -137,8 +137,7 @@ jobs:
       - name: Summary (Gitleaks)
         if: always()
         run: |
-          EXISTS="${{ hashFiles('gitleaks.sarif') }}"
-          OUTCOME="${{ steps.gitleaks_scan.outcome }}"
+          EXISTS="${{ hashFiles('gitleaks.sarif') }}"; OUTCOME="${{ steps.gitleaks_scan.outcome }}"
           if [ -n "$EXISTS" ]; then
             ICON="✅"; MSG="SARIF generado. Revisar Security tab / artifact."
             [ "$OUTCOME" != "success" ] && ICON="❌" && MSG="Se detectaron posibles secretos — ver SARIF."
@@ -257,6 +256,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -350,19 +350,17 @@ jobs:
           name: coverage-jacoco
           path: ${{ env.APP_DIR }}/target/**/jacoco*.*
 
-  # --- CodeQL: visible e informativo en el PR (summary + comentario) ---
   codeql:
     name: CodeQL (PR, warning-only)
     runs-on: ubuntu-latest
-    # Que corra aunque falle build-test (solo informativo)
-    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false) }}
     continue-on-error: true
-    needs: build-test
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
     permissions:
       contents: read
       actions: read
       security-events: write
       pull-requests: write
+    needs: build-test
     steps:
       - uses: actions/checkout@v4
 
@@ -393,44 +391,71 @@ jobs:
         with:
           category: "/language:java"
 
-      - name: Summarize CodeQL alerts and comment on PR
+      - name: CodeQL summary & PR comment
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
-            const marker = '<!-- CODEQL-SUMMARY -->';
-            const { owner, repo } = context.repo;
-            const ref = context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha;
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
 
-            // Trae alertas de CodeQL para este commit/ref
-            const alerts = await github.paginate(
-              github.rest.codeScanning.listAlertsForRepo,
-              { owner, repo, ref, tool_name: 'CodeQL', per_page: 100 }
-            );
+            // Ref correcto de la rama
+            const branch = context.payload.pull_request
+              ? context.payload.pull_request.head.ref
+              : (process.env.GITHUB_REF_NAME || '');
+            const ref = `refs/heads/${branch}`;
 
-            const counts = { critical:0, high:0, medium:0, low:0, other:0 };
-            for (const a of alerts) {
-              const lvl = a.rule?.security_severity_level || 'other';
-              if (counts[lvl] !== undefined) counts[lvl]++; else counts.other++;
+            // Espera a que GitHub procese el SARIF (hasta 5 intentos)
+            const wait = ms => new Promise(r => setTimeout(r, ms));
+            let alerts = [];
+            for (let i=0; i<5; i++) {
+              const { data } = await github.rest.codeScanning.listAlertsForRepo({
+                owner, repo,
+                tool_name: 'CodeQL',
+                state: 'open',
+                per_page: 100,
+                ref
+              });
+              alerts = data;
+              if (alerts.length > 0 || i === 4) break;
+              await wait(15000);
             }
 
-            const top = alerts.slice(0, 10).map(a => {
-              const lvl = a.rule?.security_severity_level || 'other';
-              const id  = a.rule?.id || a.rule?.name || 'rule';
-              const msg = a.most_recent_instance?.message?.text || a.rule?.description || '';
-              return `| ${lvl.toUpperCase()} | [${id}](${a.html_url}) | ${msg.replace(/\r?\n|\|/g,' ')} |`;
-            }).join('\n');
+            const sevMap = {critical:0, high:0, medium:0, low:0};
+            for (const a of alerts) {
+              const sev = (a.rule?.security_severity_level || '').toLowerCase();
+              if (sevMap[sev] !== undefined) sevMap[sev]++;
+            }
+            const total = alerts.length;
 
+            const top = alerts
+              .sort((a,b) => {
+                const rank = s => ({critical:4,high:3,medium:2,low:1}[s]||0);
+                return rank((b.rule?.security_severity_level||'').toLowerCase())
+                     - rank((a.rule?.security_severity_level||'').toLowerCase());
+              })
+              .slice(0,10)
+              .map(a => {
+                const sev = (a.rule?.security_severity_level||'').toUpperCase();
+                const title = a.rule?.name || a.rule?.id || 'Alert';
+                const path = a.most_recent_instance?.location?.path || a.most_recent_instance?.message?.text || '';
+                const url  = a.html_url || a.most_recent_instance?.html_url || a.url;
+                return `| ${sev} | ${title} | ${path} | [ver](${url}) |`;
+              })
+              .join('\n');
+
+            const marker = '<!-- CODEQL-SUMMARY -->';
             const md = `${marker}
-            ### 🔍 CodeQL — Resumen
-            **CRITICAL:** ${counts.critical} · **HIGH:** ${counts.high} · **MEDIUM:** ${counts.medium} · **LOW:** ${counts.low}
-            ${alerts.length===0 ? '✅ Sin alertas para este commit.' : `
+            ### 🔎 CodeQL — Resumen
+            **CRITICAL:** ${sevMap.critical} · **HIGH:** ${sevMap.high} · **MEDIUM:** ${sevMap.medium} · **LOW:** ${sevMap.low} · **Total:** ${total}
+
+            ${total===0 ? '✅ Sin alertas para este commit/branch.' : `
             **Top hallazgos (máx 10):**
-            | Sev | Regla | Descripción |
-            |---|---|---|
+            | Sev | Regla | Ubicación | Enlace |
+            |---|---|---|---|
             ${top}
             `}
-            _Ver todo en **Security → Code scanning alerts**._`;
+            _Fuente: Code Scanning · rama \`${branch}\`_.`;
 
             await core.summary.addRaw(md).write();
 
@@ -445,11 +470,11 @@ jobs:
               }
             }
 
-      - name: Summary (CodeQL job)
+      - name: Summary (CodeQL – modo)
         if: always()
         run: |
           {
             echo "### 🔍 CodeQL";
             echo "- Modo: **warning-only** (no bloquea PRs)";
-            echo "- Revisa *Security → Code scanning alerts* para el detalle.";
+            echo "- Revisa *Security → Code scanning alerts* para hallazgos.";
           } >> "$GITHUB_STEP_SUMMARY"

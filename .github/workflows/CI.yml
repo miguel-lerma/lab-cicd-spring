@@ -1,231 +1,402 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [ develop, qa, main ]
   push:
-    branches: [ develop, qa, main ]
+  pull_request:
+    branches: [develop, staging, main]
   workflow_dispatch:
 
-# Necesario para subir SARIF (Trivy/Gitleaks/CodeQL) y leer el repo
 permissions:
   contents: read
-  security-events: write
-  actions: read
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  JAVA_VERSION: "17"
-  # Ajusta si cambias el módulo
-  APP_DIR: Backend/Java/ms-voucher
+  JAVA_VERSION: '17'
+  APP_DIR: 'Backend/Java/ms-voucher'
 
 jobs:
   build-test:
     name: Build & Test (Maven)
     runs-on: ubuntu-latest
-
+    timeout-minutes: 25
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
 
-      - name: Setup Java ${{ env.JAVA_VERSION }}
+      - name: Ensure mvnw is executable
+        run: if [ -f "${{ env.APP_DIR }}/mvnw" ]; then chmod +x "${{ env.APP_DIR }}/mvnw"; fi
+
+      - name: Build & Unit Tests
+        id: mvn_build
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if [ -f "./mvnw" ]; then
+            ./mvnw -B -ntp clean verify
+          else
+            mvn -B -ntp clean verify
+          fi
+
+      - name: Upload JAR
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: ${{ env.APP_DIR }}/target/*.jar
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            ${{ env.APP_DIR }}/target/surefire-reports/**
+            ${{ env.APP_DIR }}/target/failsafe-reports/**
+          retention-days: 7
+
+      - name: Summary (Build & Test ✅)
+        if: ${{ success() }}
+        run: |
+          {
+            echo "### ✅ Build & Test (Maven)";
+            echo "- Módulo: \`${{ env.APP_DIR }}\`";
+            echo "- Estado: **OK**";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary (Build & Test ❌)
+        if: ${{ failure() }}
+        run: |
+          {
+            echo "### ❌ Build & Test (Maven)";
+            echo "- Módulo: \`${{ env.APP_DIR }}\`";
+            echo "- Estado: **FAIL** — ver logs del paso *Build & Unit Tests*";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  dependency-review:
+    name: Dependency Review (PR)
+    if: ${{ github.event_name == 'pull_request' && github.repository_visibility == 'public' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: dep_review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: true
+      - name: Summary (Dependency Review)
+        if: always()
+        run: |
+          OUTCOME="${{ steps.dep_review.outcome }}"
+          STATUS="CHECK"
+          if [ "$OUTCOME" = "success" ]; then STATUS="OK"; fi
+          {
+            echo "### 🧩 Dependency Review";
+            echo "- Estado: **$STATUS**";
+            echo "- Resultado: **$OUTCOME**";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  gitleaks:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      # Config simple y soportada por la acción v2 (sin inputs antiguos)
+      - name: Gitleaks scan
+        id: gitleaks_scan
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          report-format: sarif
+          report-path: ./gitleaks.sarif
+          redact: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Gitleaks SARIF (if exists)
+        if: ${{ always() && hashFiles('gitleaks.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+
+      - name: Summary (Gitleaks)
+        if: always()
+        run: |
+          EXISTS="${{ hashFiles('gitleaks.sarif') }}"
+          OUTCOME="${{ steps.gitleaks_scan.outcome }}"
+          if [ -n "$EXISTS" ]; then
+            ICON="✅"; MSG="SARIF generado. Revisar Security tab / artifact."
+            [ "$OUTCOME" != "success" ] && ICON="❌" && MSG="Se detectaron posibles secretos — ver SARIF."
+          else
+            ICON="✅"; MSG="Sin hallazgos (no se generó SARIF)."
+          fi
+          {
+            echo "### $ICON Secret Scan (Gitleaks)";
+            echo "- Estado del paso: **$OUTCOME**";
+            echo "- $MSG";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  trivy-sca:
+    name: Trivy SCA (deps)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Trivy scan (JSON)
+        id: trivy_json
+        uses: aquasecurity/trivy-action@0.24.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.APP_DIR }}
+          vuln-type: 'library'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          skip-dirs: 'target'
+          format: 'json'
+          output: 'trivy.json'
+          exit-code: '0'
+
+      - name: Trivy scan (SARIF)
+        id: trivy_sarif
+        uses: aquasecurity/trivy-action@0.24.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.APP_DIR }}
+          vuln-type: 'library'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          skip-dirs: 'target'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          exit-code: '0'
+
+      - name: Upload SARIF to Security tab (public repos)
+        if: ${{ github.repository_visibility == 'public' && hashFiles('trivy-results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Summarize Trivy results and comment on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- TRIVY-SCA-SUMMARY -->';
+            const path = 'trivy.json';
+            if (!fs.existsSync(path)) { core.info('No trivy.json; skip.'); return; }
+            const data = JSON.parse(fs.readFileSync(path,'utf8'));
+            const vulns = [];
+            for (const r of (data.Results||[])) {
+              for (const v of (r.Vulnerabilities||[])) {
+                if (['HIGH','CRITICAL'].includes(v.Severity)) {
+                  vulns.push({
+                    severity: v.Severity, id: v.VulnerabilityID||'', pkg: v.PkgName||'',
+                    installed: v.InstalledVersion||'', fixed: v.FixedVersion||'-',
+                    url: v.PrimaryURL || (v.References && v.References[0]) || ''
+                  });
+                }
+              }
+            }
+            const totalHigh = vulns.filter(x=>x.severity==='HIGH').length;
+            const totalCritical = vulns.filter(x=>x.severity==='CRITICAL').length;
+            const total = vulns.length;
+            const top = vulns.sort((a,b)=>a.severity==='CRITICAL'?-1:1).slice(0,10);
+            const rows = top.map(v=>`| ${v.severity} | ${v.pkg} | ${v.installed} | ${v.fixed} | [${v.id}](${v.url}) |`).join('\n');
+            const md = `${marker}
+            ### 🔒 Trivy SCA — Resumen
+            **HIGH:** ${totalHigh} · **CRITICAL:** ${totalCritical} · **Total:** ${total}
+            ${total===0 ? '✅ Sin vulnerabilidades HIGH/CRITICAL.' : `
+            **Top hallazgos (máx 10):**
+            | Sev | Paquete | Versión | Fijo en | CVE/ID |
+            |---|---|---:|---:|---|
+            ${rows}
+            `}
+            _Fuente: análisis de dependencias en \`${process.env.APP_DIR}\`._`;
+            await core.summary.addRaw(md).write();
+            if (context.eventName === 'pull_request') {
+              const { owner, repo } = context.repo;
+              const issue_number = context.payload.pull_request.number;
+              const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
+              const prev = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+              if (prev) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: prev.id, body: md });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number, body: md });
+              }
+            }
+            if (total > 0) core.setFailed(`Trivy encontró ${total} HIGH/CRITICAL (HIGH=${totalHigh}, CRITICAL=${totalCritical}).`);
+
+  jacoco:
+    name: JaCoCo coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Generate coverage (audit)
+        id: jacoco_run
+        working-directory: ${{ env.APP_DIR }}
+        shell: bash
+        run: |
+          set -o pipefail
+          LOG="$RUNNER_TEMP/jacoco_mvn.log"
+          mvn -B org.jacoco:jacoco-maven-plugin:0.8.11:prepare-agent test org.jacoco:jacoco-maven-plugin:0.8.11:report | tee "$LOG"
+          echo "log=$LOG" >> "$GITHUB_OUTPUT"
+
+      - name: Diagnose missing JaCoCo report
+        if: always()
+        shell: bash
+        run: |
+          APP="${{ env.APP_DIR }}"
+          LOG="${{ steps.jacoco_run.outputs.log }}"
+          XML="$(find "$APP/target" -type f -name jacoco.xml | head -n1 || true)"
+          EXEC="$(find "$APP/target" -type f -name 'jacoco*.exec' | head -n1 || true)"
+          SR="$APP/target/surefire-reports"
+          {
+            echo "### 🛠️ Diagnóstico JaCoCo"
+            [[ -n "$XML" ]] && echo "- ✅ jacoco.xml: \`$XML\`" || echo "- ❌ jacoco.xml no encontrado."
+            [[ -n "$EXEC" ]] && echo "- ✅ jacoco.exec: \`$EXEC\`" || echo "- ❌ jacoco.exec ausente."
+            if [[ -d "$SR" ]]; then
+              COUNT_XML=$(ls -1 "$SR"/*.xml 2>/dev/null | wc -l | tr -d ' ')
+              echo "- Surefire reports: **$COUNT_XML** archivos en \`$SR\`"
+              SUM=$(grep -hE "Tests run: " "$SR"/*.txt 2>/dev/null | head -n1 || true)
+              [[ -n "$SUM" ]] && echo "- Resumen surefire: $SUM"
+            else
+              echo "- ❌ \`$SR\` no existe → **no se ejecutaron pruebas**."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Maven log (diagnosis)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-maven-log
+          path: ${{ steps.jacoco_run.outputs.log }}
+
+      - name: Locate JaCoCo report
+        id: find_jacoco
+        shell: bash
+        run: |
+          FILE="$(find '${{ env.APP_DIR }}/target' -type f -name jacoco.xml | head -n1 || true)"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+          if [ -n "$FILE" ]; then
+            echo "Found jacoco: $FILE"
+          else
+            echo "No jacoco.xml found"
+          fi
+
+      - name: Summary (JaCoCo)
+        if: always()
+        shell: bash
+        run: |
+          FILE="${{ steps.find_jacoco.outputs.file }}"
+          if [[ -z "$FILE" || ! -f "$FILE" ]]; then
+            echo "### ⚠️ JaCoCo (jacoco.xml no encontrado)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          LINE=$(grep -m1 '<counter type="LINE"' "$FILE" || true)
+          MISSED=$(echo "$LINE" | sed -E 's/.*missed="([0-9]+)".*/\1/')
+          COVERED=$(echo "$LINE" | sed -E 's/.*covered="([0-9]+)".*/\1/')
+          if [[ -z "$MISSED" || -z "$COVERED" ]]; then
+            echo "### ⚠️ JaCoCo (no se pudo parsear jacoco.xml)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          TOTAL=$((MISSED + COVERED))
+          if [[ "$TOTAL" -eq 0 ]]; then
+            echo "### ⚠️ JaCoCo (sin datos de cobertura)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          PCT=$(awk "BEGIN {printf \"%.2f\", (100*$COVERED)/$TOTAL}")
+          {
+            echo "### ✅ JaCoCo coverage";
+            echo "- Reporte: \`$FILE\`";
+            echo "- Line coverage: **$PCT%**";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JaCoCo report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-jacoco
+          path: ${{ env.APP_DIR }}/target/**/jacoco*.*
+
+  # --- CodeQL: analiza cada PR en modo warning-only (no bloquea) ---
+  codeql:
+    name: CodeQL (PR, warning-only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
 
-      - name: Ensure mvnw is executable (si existe)
-        run: |
-          if [ -f "${{ env.APP_DIR }}/mvnw" ]; then
-            chmod +x "${{ env.APP_DIR }}/mvnw"
-          fi
-
-      - name: Build & Unit Tests
-        run: |
-          if [ -f "${{ env.APP_DIR }}/mvnw" ]; then
-            (cd "${{ env.APP_DIR }}" && ./mvnw -B -DskipTests=false clean verify)
-          else
-            mvn -B -f "${{ env.APP_DIR }}/pom.xml" -DskipTests=false clean verify
-          fi
-
-      - name: Upload test reports (surefire)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: surefire-reports
-          path: ${{ env.APP_DIR }}/target/surefire-reports
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: JaCoCo HTML (artifact)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: jacoco-html
-          path: ${{ env.APP_DIR }}/target/site/jacoco
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: JaCoCo coverage summary
-        if: always()
-        shell: bash
-        run: |
-          XML="${{ env.APP_DIR }}/target/site/jacoco/jacoco.xml"
-          EXEC="${{ env.APP_DIR }}/target/jacoco.exec"
-          SR="${{ env.APP_DIR }}/target/surefire-reports"
-
-          echo "## JaCoCo coverage summary" >> $GITHUB_STEP_SUMMARY
-          if [ -f "$XML" ]; then
-            # cálculo simple de cobertura por líneas
-            PCT=$(awk -F'"' '
-              /<counter type="LINE"/ { miss=$6; cov=$4; m+=miss; c+=cov }
-              END { t=m+c; if (t==0) print "0.00"; else printf "%.2f", (c*100)/t }
-            ' "$XML")
-            echo "- ✅ Encontrado **jacoco.xml**: \`$XML\`" >> $GITHUB_STEP_SUMMARY
-            echo "- Line coverage: **$PCT%**" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- ⚠️ JaCoCo (jacoco.xml no encontrado)" >> $GITHUB_STEP_SUMMARY
-            if [ -f "$EXEC" ]; then
-              echo "  - ✅ \`jacoco.exec\` presente: \`$EXEC\` (si falta el XML, probablemente no corrió el goal **report**)." >> $GITHUB_STEP_SUMMARY
-            fi
-          fi
-          if [ -d "$SR" ]; then
-            CNT=$(ls -1 "$SR" | wc -l)
-            echo "- Surefire reports: **$CNT** archivos en \`$SR\`" >> $GITHUB_STEP_SUMMARY
-          fi
-
-  trivy-deps:
-    name: Trivy SCA (deps)
-    runs-on: ubuntu-latest
-    needs: build-test
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # --- SARIF (para Security tab) y gating (HIGH/CRITICAL) ---
-      - name: Trivy deps → SARIF (gating HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: fs
-          scan-ref: ${{ env.APP_DIR }}
-          vuln-type: library
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          skip-dirs: ${{ env.APP_DIR }}/target
-          format: sarif
-          output: trivy-results.sarif
-          exit-code: '1'   # falla si encuentra HIGH/CRITICAL
-
-      - name: Upload Trivy SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-results.sarif
-
-      # --- HTML completo para descarga/consulta (no bloquea) ---
-      - name: Crear carpeta de reportes
-        if: always()
-        run: mkdir -p reports
-
-      - name: Trivy deps → HTML (completo, informativo)
-        if: always()
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: fs
-          scan-ref: ${{ env.APP_DIR }}
-          vuln-type: library
-          # en HTML incluimos todos los niveles para que sea completo
-          severity: CRITICAL,HIGH,MEDIUM,LOW
-          ignore-unfixed: true
-          skip-dirs: ${{ env.APP_DIR }}/target
-          format: template
-          template: '@/contrib/html.tpl'
-          output: reports/trivy-deps.html
-          exit-code: '0'   # NO bloquea el job
-
-      - name: Subir reporte HTML (artifact)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-deps-html
-          path: reports/trivy-deps.html
-          retention-days: 14
-
-      - name: Summary Trivy
-        if: always()
-        run: |
-          echo "### Trivy SCA — Reportes" >> $GITHUB_STEP_SUMMARY
-          echo "- **SARIF** visible en *Security → Code scanning alerts*." >> $GITHUB_STEP_SUMMARY
-          echo "- **HTML** descargable en *Artifacts → trivy-deps-html*." >> $GITHUB_STEP_SUMMARY
-
-  gitleaks:
-    name: Secret Scan (Gitleaks)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Gitleaks scan (SARIF)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          report_format: sarif
-          report_path: gitleaks.sarif
-          redact: true
-          # el action falla automáticamente si encuentra secretos
-
-      - name: Upload Gitleaks SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: gitleaks.sarif
-
-      - name: Summary Gitleaks
-        if: always()
-        run: |
-          echo "### Gitleaks — Secret scan" >> $GITHUB_STEP_SUMMARY
-          echo "- Revisa *Security → Secret scanning* y el SARIF subido." >> $GITHUB_STEP_SUMMARY
-
-  codeql:
-    name: CodeQL (warning-only)
-    runs-on: ubuntu-latest
-    # Solo en PR y sin bloquear (warning)
-    if: ${{ github.event_name == 'pull_request' }}
-    continue-on-error: true
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Java ${{ env.JAVA_VERSION }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Initialize CodeQL
+      - name: Init CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: java
+          queries: +security-and-quality
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+      - name: Build for CodeQL database
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if [ -f "./mvnw" ]; then
+            ./mvnw -B -DskipTests package
+          else
+            mvn -B -DskipTests package
+          fi
 
       - name: Analyze
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:java"
 
-      - name: Summary CodeQL
+      - name: Summary (CodeQL)
         if: always()
         run: |
-          echo "### CodeQL (warning-only)" >> $GITHUB_STEP_SUMMARY
-          echo "Los hallazgos aparecen en *Security → Code scanning alerts*." >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### 🔍 CodeQL";
+            echo "- Modo: **warning-only** (no bloquea PRs)";
+            echo "- Revisa *Security → Code scanning alerts* para hallazgos.";
+          } >> "$GITHUB_STEP_SUMMARY"

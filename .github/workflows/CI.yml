@@ -95,7 +95,7 @@ jobs:
     permissions:
       contents: read
       security-events: write       # subir SARIF al Security tab (repos públicos)
-      pull-requests: write         # comentar en PR
+      pull-requests: write         # comentar/actualizar comentario en PR
       actions: read
     steps:
       - uses: actions/checkout@v4
@@ -141,22 +141,24 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
-      # 3) Crear resumen (Job Summary) y comentar en el PR con top vulnerabilidades
+      # 3) Resumen Markdown + comentario en PR + gate (falla si hay HIGH/CRITICAL)
       - name: Summarize Trivy results and comment on PR
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const core = require('@actions/core');
+            const marker = '<!-- TRIVY-SCA-SUMMARY -->';
             const path = 'trivy.json';
+
             if (!fs.existsSync(path)) {
               core.info('No trivy.json found; skipping summary.');
               return;
             }
-            const data = JSON.parse(fs.readFileSync(path, 'utf-8'));
 
-            // Extrae vulnerabilidades (HIGH/CRITICAL)
+            const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+
+            // Extraer HIGH/CRITICAL
             const vulns = [];
             for (const r of (data.Results || [])) {
               for (const v of (r.Vulnerabilities || [])) {
@@ -167,7 +169,6 @@ jobs:
                     pkg: v.PkgName || '',
                     installed: v.InstalledVersion || '',
                     fixed: v.FixedVersion || '-',
-                    title: v.Title || '',
                     url: v.PrimaryURL || (v.References && v.References[0]) || ''
                   });
                 }
@@ -178,16 +179,15 @@ jobs:
             const totalCritical = vulns.filter(x => x.severity === 'CRITICAL').length;
             const total = vulns.length;
 
-            // Arma tabla (máx 10 filas)
             const top = vulns
               .sort((a,b) => (a.severity === 'CRITICAL' ? -1 : 1))
-              .slice(0,10);
+              .slice(0, 10);
 
             const rows = top.map(v =>
               `| ${v.severity} | ${v.pkg} | ${v.installed} | ${v.fixed} | [${v.id}](${v.url}) |`
             ).join('\n');
 
-            const md = `
+            const md = `${marker}
             ### 🔒 Trivy SCA — Resumen de vulnerabilidades
             **HIGH:** ${totalHigh} · **CRITICAL:** ${totalCritical} · **Total:** ${total}
 
@@ -200,19 +200,25 @@ jobs:
 
             _Fuente: análisis de dependencias (filesystem) en \`${process.env.APP_DIR}\`._`;
 
-            core.summary.addRaw(md).write();
+            // Summary del job
+            await core.summary.addRaw(md).write();
 
+            // Comentario en PR: actualiza si existe, si no crea uno nuevo
             if (context.eventName === 'pull_request') {
-              const pr = context.payload.pull_request;
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: pr.number,
-                body: md
+              const { owner, repo } = context.repo;
+              const issue_number = context.payload.pull_request.number;
+              const { data: comments } = await github.rest.issues.listComments({
+                owner, repo, issue_number, per_page: 100
               });
+              const prev = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+              if (prev) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: prev.id, body: md });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number, body: md });
+              }
             }
 
-            // Falla el job si hay HIGH/CRITICAL
+            // Gate: falla si hay HIGH/CRITICAL
             if (total > 0) {
               core.setFailed(`Trivy found ${total} HIGH/CRITICAL vulnerabilities (HIGH=${totalHigh}, CRITICAL=${totalCritical}).`);
             }

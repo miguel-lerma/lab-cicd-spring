@@ -15,7 +15,7 @@ concurrency:
 
 env:
   JAVA_VERSION: "17"
-  APP_DIR: "Backend/Java/ms-voucher"
+  APP_DIR: "Backend/Java/ms-voucher"   # carpeta donde vive tu pom.xml
 
 jobs:
   build-test:
@@ -29,8 +29,10 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
+
       - name: Ensure mvnw is executable
         run: if [ -f "${{ env.APP_DIR }}/mvnw" ]; then chmod +x "${{ env.APP_DIR }}/mvnw"; fi
+
       - name: Build & Unit Tests
         working-directory: ${{ env.APP_DIR }}
         run: |
@@ -39,12 +41,15 @@ jobs:
           else
             mvn -B -ntp clean verify
           fi
+
       - name: Upload JAR
         uses: actions/upload-artifact@v4
         with:
           name: app-jar
           path: ${{ env.APP_DIR }}/target/*.jar
           if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -53,8 +58,9 @@ jobs:
           path: |
             ${{ env.APP_DIR }}/target/surefire-reports/**
             ${{ env.APP_DIR }}/target/failsafe-reports/**
+          retention-days: 7
 
-  # Solo aplica a PR y repos públicos (en privados requiere GHAS)
+  # Solo en PR y en repos públicos (en privados requeriría GHAS)
   dependency-review:
     name: Dependency Review (PR)
     if: ${{ github.event_name == 'pull_request' && github.repository_visibility == 'public' }}
@@ -82,32 +88,48 @@ jobs:
           version: latest
           args: --verbose --redact --exit-code 1
 
-  # ---- SCA con Trivy (recomendada, sin cuentas) ----
+  # ---- SCA con Trivy (sin cuentas, recomendado) ----
   trivy-sca:
     name: Trivy SCA (deps)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write            # para subir SARIF al Security tab (repos públicos)
+      security-events: write          # subir SARIF al Security tab en repos públicos
       actions: read
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+
       - name: Trivy scan (filesystem)
+        id: trivy
         uses: aquasecurity/trivy-action@0.24.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # evita rate limits y problemas en PRs
         with:
           scan-type: fs
-          scan-ref: ${{ env.APP_DIR }}  # analiza pom.xml del módulo
-          vuln-type: library
-          severity: HIGH,CRITICAL
+          # ruta ABSOLUTA dentro del contenedor de la acción
+          scan-ref: ${{ github.workspace }}/${{ env.APP_DIR }}
+          vuln-type: 'library'
+          severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
-          format: sarif
-          output: trivy-results.sarif
-          exit-code: 1                   # falla el job si hay HIGH/CRITICAL
-      - name: Upload SARIF to Security tab
+          # reducir ruido de binarios compilados
+          skip-dirs: ${{ github.workspace }}/${{ env.APP_DIR }}/target
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          exit-code: '1'                 # falla si hay HIGH/CRITICAL
+
+      - name: Upload SARIF to Security tab (public repos)
+        if: ${{ github.repository_visibility == 'public' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
+
+      - name: Save Trivy report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sca
+          path: trivy-results.sarif
 
   spotbugs:
     name: SpotBugs (SAST ligero)

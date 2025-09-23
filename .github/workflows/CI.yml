@@ -82,7 +82,6 @@ jobs:
             echo "- Estado: **FAIL** — ver logs del paso *Build & Unit Tests*";
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Solo en PR y en repos públicos (en privados requiere GHAS)
   dependency-review:
     name: Dependency Review (PR)
     if: ${{ github.event_name == 'pull_request' && github.repository_visibility == 'public' }}
@@ -127,7 +126,7 @@ jobs:
         id: gitleaks_scan
         uses: gitleaks/gitleaks-action@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # requerido para PRs
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           version: latest
           args: --verbose --redact --exit-code 1 --report-format sarif --report-path gitleaks.sarif
@@ -151,20 +150,18 @@ jobs:
             echo "- $MSG";
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ---- SCA con Trivy + resumen en PR y Code Scanning ----
   trivy-sca:
     name: Trivy SCA (deps)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write       # subir SARIF al Security tab (repos públicos)
-      pull-requests: write         # comentar/actualizar comentario en PR
+      security-events: write
+      pull-requests: write
       actions: read
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
-      # 1) Trivy en JSON (no falla) para poder resumir y comentar
       - name: Trivy scan (JSON)
         id: trivy_json
         uses: aquasecurity/trivy-action@0.24.0
@@ -172,16 +169,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           scan-type: fs
-          scan-ref: ${{ env.APP_DIR }}     # Backend/Java/ms-voucher
+          scan-ref: ${{ env.APP_DIR }}
           vuln-type: 'library'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
           skip-dirs: 'target'
           format: 'json'
           output: 'trivy.json'
-          exit-code: '0'                   # no fallar aquí
+          exit-code: '0'
 
-      # 2) Trivy en SARIF (no falla) para Security tab
       - name: Trivy scan (SARIF)
         id: trivy_sarif
         uses: aquasecurity/trivy-action@0.24.0
@@ -196,7 +192,7 @@ jobs:
           skip-dirs: 'target'
           format: 'sarif'
           output: 'trivy-results.sarif'
-          exit-code: '0'                   # no fallar aquí
+          exit-code: '0'
 
       - name: Upload SARIF to Security tab (public repos)
         if: ${{ github.repository_visibility == 'public' }}
@@ -204,7 +200,6 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
-      # 3) Resumen Markdown + comentario en PR + gate (falla si hay HIGH/CRITICAL)
       - name: Summarize Trivy results and comment on PR
         if: always()
         uses: actions/github-script@v7
@@ -220,8 +215,6 @@ jobs:
             }
 
             const data = JSON.parse(fs.readFileSync(path, 'utf8'));
-
-            // Extraer HIGH/CRITICAL
             const vulns = [];
             for (const r of (data.Results || [])) {
               for (const v of (r.Vulnerabilities || [])) {
@@ -263,10 +256,8 @@ jobs:
 
             _Fuente: análisis de dependencias (filesystem) en \`${process.env.APP_DIR}\`._`;
 
-            // Summary del job
             await core.summary.addRaw(md).write();
 
-            // Comentario en PR: actualiza si existe, si no crea uno nuevo
             if (context.eventName === 'pull_request') {
               const { owner, repo } = context.repo;
               const issue_number = context.payload.pull_request.number;
@@ -281,7 +272,6 @@ jobs:
               }
             }
 
-            // Gate: falla si hay HIGH/CRITICAL
             if (total > 0) {
               core.setFailed(`Trivy found ${total} HIGH/CRITICAL vulnerabilities (HIGH=${totalHigh}, CRITICAL=${totalCritical}).`);
             }
@@ -382,27 +372,36 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: |
           mvn -B org.jacoco:jacoco-maven-plugin:0.8.11:prepare-agent test org.jacoco:jacoco-maven-plugin:0.8.11:report || true
+
       - name: Summary (JaCoCo)
         if: always()
+        shell: bash
         run: |
           XML="${{ env.APP_DIR }}/target/site/jacoco/jacoco.xml"
-          if [ -f "$XML" ]; then
-            LINE=$(grep -o '<counter type="LINE"[^/]*/>' "$XML" | head -1 || true)
-            MISSED=$(echo "$LINE" | sed -n 's/.*missed="\([0-9]*\)".*/\1/p')
-            COVERED=$(echo "$LINE" | sed -n 's/.*covered="\([0-9]*\)".*/\1/p')
-            if [ -n "$MISSED" ] && [ -n "$COVERED" ]; then
-              TOTAL=$((MISSED + COVERED))
-              if [ "$TOTAL" -gt 0 ]; then
-                PCT=$(awk "BEGIN {printf \"%.2f\", (100*$COVERED)/$TOTAL}")
-                echo "### ✅ JaCoCo (Line coverage: $PCT%)" >> "$GITHUB_STEP_SUMMARY"
-              else
-                echo "### ⚠️ JaCoCo (sin datos de cobertura)" >> "$GITHUB_STEP_SUMMARY"
-              fi
-            else
-              echo "### ⚠️ JaCoCo (no se pudo parsear jacoco.xml)" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          else
+          if [[ ! -f "$XML" ]]; then
             echo "### ⚠️ JaCoCo (jacoco.xml no encontrado)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          LINE=$(grep -m1 '<counter type="LINE"' "$XML" || true)
+          MISSED=$(echo "$LINE" | sed -E 's/.*missed="([0-9]+)".*/\1/')
+          COVERED=$(echo "$LINE" | sed -E 's/.*covered="([0-9]+)".*/\1/')
+
+          if [[ -z "$MISSED" || -z "$COVERED" ]]; then
+            echo "### ⚠️ JaCoCo (no se pudo parsear jacoco.xml)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          TOTAL=$((MISSED + COVERED))
+          if [[ "$TOTAL" -eq 0 ]]; then
+            echo "### ⚠️ JaCoCo (sin datos de cobertura)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          PCT=$(awk "BEGIN {printf \"%.2f\", (100*$COVERED)/$TOTAL}")
+
+          echo "### ✅ JaCoCo (Line coverage: $PCT%)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload JaCoCo report
         if: always()
         uses: actions/upload-artifact@v4
